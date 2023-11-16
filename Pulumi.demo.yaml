@@ -1,0 +1,8 @@
+config:
+  aws:profile: demo
+  aws:region: us-east-1
+  cidr_block: 10.0.0.0/16
+  destination_cidr_block: 0.0.0.0/0
+  desired_subnets: 3
+  amiid: ami-0f76dbaffdc07fb77
+  localhostport: 3000
