@@ -2,7 +2,11 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
 const awsx = require("@pulumi/awsx");
+const gcp = require("@pulumi/gcp");
+const fs = require('fs');
 
+require('dotenv').config();
+let AWS_REGION = process.env.AWS_REGION;
 // Create an AWS resource (S3 Bucket)
 //const bucket = new aws.s3.Bucket("my-bucket");
 // Export the name of the bucket
@@ -54,12 +58,15 @@ const cwrassumeservice = config.require("cwrassumeservice");
 const cloudwatchfullaccess = config.require("cloudwatchfullaccess");
 const cloudwatchagentserver = config.require("cloudwatchagentserver");
 const arecordzone = config.require("arecordzone");
+const arecorddevzone = config.require("arecorddevzone");
 const arecordtype = config.require("arecordtype");
 const arecordttl = config.require("arecordttl");
 
 const loadbalancertype = config.require("loadbalancertype");
 const targetgrouptargettype = config.require("targetgrouptargettype");
 const httpprotocol = config.require("httpprotocol");
+const httpsprotocol = config.require("httpsprotocol");
+const sslpolicy = config.require("sslpolicy");
 const targetgrouppath = config.require("targetgrouppath");
 const healthythreshold = config.require("healthythreshold");
 const unhealthythreshold = config.require("unhealthythreshold");
@@ -74,11 +81,45 @@ const listenertype = config.require("listenertype");
 const scaleuppolicyadjustment = config.require("scaleuppolicyadjustment");
 const scaledownpolicyadjustment = config.require("scaledownpolicyadjustment");
 
-
+const GOOGLE_APPLICATION_CREDENTIALS = config.require("GOOGLE_APPLICATION_CREDENTIALS");
+const mgAPI = config.require("mgAPI");
 let awsConfig = new pulumi.Config("aws");
 let awsRegion = awsConfig.require("region");
+
+const pemID = config.require("pemID");
+const devsslcertarn = config.require("devsslcertarn");
+const demosslcertarn = config.require("demosslcertarn");
 console.log(cidr_block, desired_subnets, destination_cidr_block);
 
+//GCP Section
+// Define the service account
+const serviceAccount = new gcp.serviceaccount.Account("csye6225-webapp", {
+    accountId: "csye6225-webapp",
+    displayName: "csye6225",
+    project: "csye6225-demo-406314"
+});
+
+// Create a GCP Service Account
+const createServiceAccount = new gcp.serviceaccount.Account("my-service-account", {
+    accountId: "my-service-account",
+    displayName: "My Service Account",
+    project: "csye6225-demo-406314"
+});
+
+// Create a GCP Storage Bucket
+const gcpBucket = new gcp.storage.Bucket("my-unique-bucket", {
+    name: "csye6225-demo-406314-bucket-democsye6225anirudhvinfo", // Globally unique name
+    location: "US",
+    project: "csye6225-demo-406314",
+    forceDestroy: true
+});
+
+// Create Service Account's Access Key
+const accessKey = new gcp.serviceaccount.Key("my-access-key", {
+    serviceAccountId: createServiceAccount.name
+});
+
+// AWS Section
 // Assignment 4 : 
 // Step 1: Create a Virtual Private Cloud (VPC).
 const vpc = new aws.ec2.Vpc('myVpc', {
@@ -336,13 +377,29 @@ availabilityZones1.apply(azs => {
     const rdsInstancePassword = rdsInstance.password;
     const rdsInstancedbName = rdsInstance.dbName;
     const rdsInstanceDialect = rdsInstance.engine;
-
+    const dynamodbTable = new aws.dynamodb.Table('my-Table', {
+        attributes: [{
+            name: "Id",
+            type: "N",
+        }],
+        hashKey: "Id",
+        readCapacity: 5,
+        writeCapacity: 5,
+    });
+    // Create an AWS resource (SNS Topic)
+    const snsTopic = new aws.sns.Topic("myTopic");
     const ec2UserData = pulumi.interpolate`#!/bin/bash
 echo "DB_HOST=${rdsInstanceEndpoint}" > /opt/csye6225/webapp/.env
 echo "DB_NAME=${rdsInstancedbName}" >> /opt/csye6225/webapp/.env
 echo "DB_USER=${rdsInstanceUserName}" >> /opt/csye6225/webapp/.env
 echo "DB_PASS=${rdsInstancePassword}" >> /opt/csye6225/webapp/.env
 echo "DB_DIALECT=${rdsInstanceDialect}" >> /opt/csye6225/webapp/.env
+echo "SNS_ARN=${snsTopic.arn}" >> /opt/csye6225/webapp/.env
+echo "NODE_ENV=demo" >> /opt/csye6225/webapp/.env
+echo "GCSBucketName=${gcpBucket.name}" >> /opt/csye6225/webapp/.env
+echo "DYNAMODB_TABLE_NAME=${dynamodbTable.name}" >> /opt/csye6225/webapp/.env
+echo "MG_API=${mgAPI}" >> /opt/csye6225/webapp/.env
+sudo echo "AWS_REGION=${AWS_REGION}" >> /opt/csye6225/webapp/.env
 
 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
     -a fetch-config \
@@ -387,7 +444,7 @@ sudo systemctl restart web-app
 
     // Create an EC2 instance    
     // Retrieve an existing AWS key pair by its name
-    const existingKeyPair = aws.ec2.KeyPair.get("my-existing-key-pair", "1");
+    const existingKeyPair = aws.ec2.KeyPair.get("my-existing-key-pair", pemID);
 
     const existingKeyName = existingKeyPair.keyName;
 
@@ -397,6 +454,7 @@ sudo systemctl restart web-app
         return Buffer.from(script).toString('base64');
     });
     const launchTemplate = new aws.ec2.LaunchTemplate("asg-launch-template", {
+        name: "my-launch-template",
         blockDeviceMappings: [{
             deviceName: "/dev/xvda",
             ebs: {
@@ -458,8 +516,10 @@ sudo systemctl restart web-app
     // Create an AWS Listener for the Load Balancer
     const listener = new aws.lb.Listener("front_end", {
         loadBalancerArn: lb.arn,
-        port: port80,
-        protocol: httpprotocol,
+        port: port443,
+        protocol: httpsprotocol,
+        sslPolicy: sslpolicy,
+        certificateArn: demosslcertarn,
         defaultActions: [{
             type: listenertype,
             targetGroupArn: targetGroup.arn,
@@ -471,6 +531,7 @@ sudo systemctl restart web-app
         maxSize: maxsize,
         minSize: 1,
         forceDelete: true,
+        name: "csye6225-auto-scaling-group",
         defaultCooldown: cooldown,
         launchTemplate: {
             id: launchTemplate.id,
@@ -538,12 +599,169 @@ sudo systemctl restart web-app
         }
     );
 
+    // Assignment 9 addons : 
+    // Create an IAM Role
+    const assumeRolePolicy = {
+        Version: "2012-10-17",
+        Statement: [{
+            Effect: "Allow",
+            Principal: {
+                Service: ["ec2.amazonaws.com"]
+            },
+            Action: ["sts:AssumeRole"],
+        }],
+    };
+
+    const role = new aws.iam.Role("cloudwatch_SNS_Role", {
+        assumeRolePolicy: JSON.stringify(assumeRolePolicy)
+    });
+    // const role = new aws.iam.Role("cloudwatch_SNS_Role", {
+    //     assumeRolePolicy: JSON.stringify(ec2CloudWatchRole)
+    // });
+    const fullAccessPolicy = new aws.iam.Policy("fullAccess", {
+        policy: JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [{
+                Action: "dynamodb:*",
+                Effect: "Allow",
+                Resource: "*"
+            }]
+        })
+    });
+    const snsPolicyArn = "arn:aws:iam::aws:policy/AmazonSNSFullAccess";
+    const snsRolePolicyAttachment = new aws.iam.RolePolicyAttachment("snsPolicyAttachment", {
+        role: role.name,      // Referencing the name of the IAM role
+        policyArn: snsPolicyArn, // Directly using the policy ARN
+    });
+
+    const roleIAMinstanceProfile = new aws.iam.InstanceProfile("my-role-instance-profile", {
+        role: role.name,
+    });
+
+
+    // Construct IAM role for AWS Lambda function to access other AWS services
+    const lambdaRole = new aws.iam.Role("myLambdaRole", {
+        assumeRolePolicy: JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [{
+                Action: "sts:AssumeRole",
+                Principal: {
+                    Service: "lambda.amazonaws.com"
+                },
+                Effect: "Allow"
+            }]
+        })
+    });
+    // new aws.iam.Policy("lambdaExecution", {
+    //     policy: {
+    //         Version: "2012-10-17",
+    //         Statement: [{
+    //             Action: [
+    //                 "logs:CreateLogGroup",
+    //                 "logs:CreateLogStream",
+    //                 "logs:PutLogEvents",
+    //             ],
+    //             Effect: "Allow",
+    //             Resource: "*",
+    //         }],
+    //     },
+    // });
+    const lambdaExecPolicyDocument = JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Action: [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            Effect: "Allow",
+            Resource: "*"  // You should scope this to specific resources if possible
+        }]
+    });
+
+
+
+    // Create an IAM Policy from the policy document
+    const lambdaExecPolicy = new aws.iam.Policy("lambda-exec-policy", {
+        policy: lambdaExecPolicyDocument
+    });
+    // Attach the policy to the Lambda role
+    const lambdaExecPolicyAttachment = new aws.iam.RolePolicyAttachment("lambda-exec-policy-attachment", {
+        role: lambdaRole.id,
+        policyArn: lambdaExecPolicy.arn
+    });
+    const fullaccessPolicyAttachment = new aws.iam.RolePolicyAttachment("lambda_fullaccess-policy-attachment", {
+        role: lambdaRole.id,
+        policyArn: fullAccessPolicy.arn
+    });
+    // Get the predefined AWS Lambda execution role policy
+    // const lambdaSnsPolicy = aws.iam.getPolicy({ arn: "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" });
+    // new aws.iam.RolePolicyAttachment("lambdaRolePolicy", {
+    //     role: role.name,
+    //     policyArn: "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+    // });
+    const accessPolicyAttachment = new aws.iam.RolePolicyAttachment("lambda_access-policy-attachment", {
+        role: lambdaRole.id,
+        policyArn: "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+    });
+
+    // Create AWS Lambda function
+
+    const lambdaFunc = new aws.lambda.Function("lambda-func", {
+        code: new pulumi.asset.AssetArchive({
+            ".": new pulumi.asset.FileArchive("../serverless/archive")
+        }),
+        role: lambdaRole.arn,
+        handler: "index.handler",
+        runtime: "nodejs18.x",
+        environment: {
+            variables: {
+                "GCP_SECRET_ACCESS_KEY": accessKey.secret, // replace with your actual secret
+                "BUCKET_NAME": gcpBucket.id, // replace with your actual bucket id
+                "DYNAMODB_TABLE_NAME": dynamodbTable.id, // replace with your actual table id
+                "API": mgAPI, // replace with your actual API
+                "REGION": AWS_REGION // replace with your actual region
+            }
+        }
+    });
+    // Create a new Log group to store the logs
+    const logGroup = new aws.cloudwatch.LogGroup("SNS_log_group");
+
+    // Construct a Log Stream 
+    const logStream = new aws.cloudwatch.LogStream("my_log_stream", {
+        logGroupName: logGroup.name
+    });
+
+    // This IAM policy allows CloudWatch Logs to call the Lambda function
+    const logsInvokePermission = new aws.lambda.Permission("invoke-perm-logs", {
+        action: "lambda:InvokeFunction",
+        function: lambdaFunc.name,
+        principal: "logs.amazonaws.com",
+        sourceArn: logGroup.arn
+    });
+
+    // Give permission to SNS to invoke the Lambda
+    const snsInvokePermission = new aws.lambda.Permission("sns-invoke-perm", {
+        action: "lambda:InvokeFunction",
+        function: lambdaFunc.arn,
+        principal: "sns.amazonaws.com",
+        sourceArn: snsTopic.arn // Assuming snsTopic is defined elsewhere
+    });
+
+    // Assuming sns_topic is defined elsewhere in your Pulumi program
+    // Subscribe the SNS topic to the Lambda function
+    const subscription = new aws.sns.TopicSubscription("my-subscription", {
+        protocol: "lambda",
+        endpoint: lambdaFunc.arn,
+        topic: snsTopic.arn
+    });
+
     exports.rdsEndpoint = rdsInstance.endpoint;
 });
 exports.availabilityZones1 = availabilityZones1;
 
 // Export the VPC ID for other Pulumi stacks to reference.
 exports.vpcId = vpc.id;
-
+exports.bucketSelfLink = gcpBucket.selfLink;
 
 
